@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Workload Prioritizer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+<style>
+  /* Ensure Thai uses IBM Plex Thai when language is th */
+  html[lang="th"] body { font-family: 'IBM Plex Sans Thai', 'Inter', sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="chart.jsx"></script>
+<script type="text/babel" src="addtask.jsx"></script>
+<script type="text/babel" src="tasklist.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+
+<script type="text/babel">
+const { useState, useMemo, useEffect, useRef } = React;
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "language": "en",
+  "chartType": "stacked",
+  "capacity": 7,
+  "density": "comfortable",
+  "dark": false
+}/*EDITMODE-END*/;
+
+function App() {
+  const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const t = STRINGS[tweaks.language] || STRINGS.en;
+  const [weekOffset, setWeekOffset] = useState(0);
+  // Single flat list — slots' absolute dateKey decides which week they show in.
+  const [allTasks, setTasks] = useState(makeInitialTasks);
+  const [showAdd, setShowAdd] = useState(false);
+  const [showOnb, setShowOnb] = useState(true);
+  const [onbCap, setOnbCap] = useState(tweaks.capacity);
+  const [selectedTaskId, setSelectedTaskId] = useState(null);
+
+  const dates = useMemo(() => weekDates(weekOffset), [weekOffset]);
+  const todayDate = useMemo(() => new Date(2026, 3, 27), []); // Mon Apr 27, 2026
+  const dayLabels = t.dayLabels;
+  const weekKeys = useMemo(() => dates.map(dateKey), [dates]);
+
+  // Tasks shown for the current week = any task with at least one slot
+  // whose dateKey falls inside this week's keys, or whose deadline is in week.
+  const tasks = useMemo(() => allTasks.filter((task) =>
+    task.slots.some((s) => weekKeys.includes(s.dateKey)) ||
+    weekKeys.includes(task.deadlineKey)
+  ), [allTasks, weekKeys]);
+
+  // Update <html lang> for font switching
+  useEffect(() => {
+    document.documentElement.lang = tweaks.language;
+  }, [tweaks.language]);
+
+  // Day totals + overload calc (slots use absolute dateKey now)
+  const dayTotals = useMemo(() => {
+    const out = Array(7).fill(0);
+    tasks.forEach((task) => task.slots.forEach((s) => {
+      const idx = weekKeys.indexOf(s.dateKey);
+      if (idx >= 0) out[idx] += s.hours;
+    }));
+    return out;
+  }, [tasks, weekKeys]);
+
+  const total = dayTotals.reduce((a, b) => a + b, 0);
+  const overDays = dayTotals.map((v, i) => v > tweaks.capacity ? i : -1).filter((i) => i >= 0);
+  const heaviestDay = dayTotals.indexOf(Math.max(...dayTotals));
+  const heaviestHours = dayTotals[heaviestDay];
+
+  const fmtRange = (dates) => {
+    const a = dates[0], b = dates[6];
+    const m = (d) => d.toLocaleDateString(tweaks.language === 'th' ? 'th-TH' : 'en-US', { month: 'short' });
+    if (a.getMonth() === b.getMonth()) {
+      return `${m(a)} ${a.getDate()}–${b.getDate()}, ${a.getFullYear()}`;
+    }
+    return `${m(a)} ${a.getDate()} – ${m(b)} ${b.getDate()}`;
+  };
+
+  const handleAddTask = ({ title, subjectId, deadlineKey, difficulty, importance, comfortable, hours, slots }) => {
+    const task = {
+      id: 't' + Date.now(),
+      title, subjectId, deadlineKey, difficulty, importance, comfortable, hours,
+      slots: slots || [],
+    };
+    setTasks((prev) => [...prev, task]);
+    setShowAdd(false);
+  };
+
+  const handleMoveSlot = (taskId, slotIdx, newDateKey) => {
+    setTasks((prev) => prev.map((task) => {
+      if (task.id !== taskId) return task;
+      const slots = task.slots.map((s, i) => i === slotIdx ? { ...s, dateKey: newDateKey } : s);
+      return { ...task, slots };
+    }));
+  };
+
+  const handleDeleteTask = (taskId) => {
+    setTasks((prev) => prev.filter((task) => task.id !== taskId));
+    if (selectedTaskId === taskId) setSelectedTaskId(null);
+  };
+
+  const handleUpdateTask = (updated) => {
+    setTasks((prev) => prev.map((task) => task.id === updated.id ? updated : task));
+  };
+
+  const onbStart = () => {
+    setTweak('capacity', onbCap);
+    setShowOnb(false);
+  };
+
+  return (
+    <div className={`app ${tweaks.density === 'compact' ? 'compact' : ''}`}
+         data-theme={tweaks.dark ? 'dark' : 'light'}>
+
+      {/* Onboarding */}
+      {showOnb && (
+        <div className="onb">
+          <div className="onb-card">
+            <div className="onb-mark"></div>
+            <h1>{t.onboardingTitle}</h1>
+            <p>{t.onboardingDesc}</p>
+            <div className="onb-q">{t.capacityQ}</div>
+            <div className="onb-cap">
+              <span className="onb-cap-val mono">{onbCap}</span>
+              <span className="onb-cap-unit">{t.hoursFull} {t.perDay}</span>
+            </div>
+            <input type="range" className="onb-slider"
+                   min="2" max="12" step="1"
+                   value={onbCap}
+                   onChange={(e) => setOnbCap(Number(e.target.value))} />
+            <button className="onb-start" onClick={onbStart}>{t.start} →</button>
+          </div>
+        </div>
+      )}
+
+      {/* Main column */}
+      <div className="main">
+        <div className="hdr">
+          <div className="hdr-brand">
+            <div className="brand-mark"></div>
+            <div className="brand-text">
+              <span className="brand-name">{t.appName}</span>
+              <span className="brand-tag">{t.tagline}</span>
+            </div>
+          </div>
+          <div className="week-nav">
+            <button className="week-arrow" onClick={() => setWeekOffset((w) => w - 1)} aria-label="prev week">‹</button>
+            <div className="week-label">
+              <div className="week-range">{fmtRange(dates)}</div>
+              <div className="week-sub mono">{t.week} · {dates[0].getDate()}–{dates[6].getDate()}</div>
+            </div>
+            <button className="week-arrow" onClick={() => setWeekOffset((w) => w + 1)} aria-label="next week">›</button>
+            {weekOffset !== 0 && (
+              <button className="week-today" onClick={() => setWeekOffset(0)}>{t.today}</button>
+            )}
+          </div>
+        </div>
+
+        {/* Stats */}
+        <div className="stats">
+          <StatTile label={t.totalThisWeek} value={total} unit={t.hours} />
+          <StatTile label={t.tasksThisWeek} value={tasks.length} />
+          <StatTile label={t.weekHigh}
+                    value={heaviestHours > 0 ? `${dayLabels[heaviestDay]} ${heaviestHours}` : t.none}
+                    unit={heaviestHours > 0 ? t.hours : ''}
+                    tone={heaviestHours > tweaks.capacity ? 'warn' : ''} />
+          <StatTile label={t.overdays}
+                    value={overDays.length}
+                    tone={overDays.length > 0 ? 'warn' : ''} />
+        </div>
+
+        {/* Overload alert */}
+        <OverloadBanner overDays={overDays} dayLabels={dayLabels} dates={dates} t={t} />
+
+        {/* Chart */}
+        <div className="chart-section">
+          <div className="chart-head">
+            <div className="chart-title">
+              {t.week} {t.chartType.toLowerCase()}
+            </div>
+            <div className="chart-toggle">
+              <button className={tweaks.chartType === 'stacked' ? 'on' : ''}
+                      onClick={() => setTweak('chartType', 'stacked')}>{t.stacked}</button>
+              <button className={tweaks.chartType === 'bar' ? 'on' : ''}
+                      onClick={() => setTweak('chartType', 'bar')}>{t.bar}</button>
+              <button className={tweaks.chartType === 'heatmap' ? 'on' : ''}
+                      onClick={() => setTweak('chartType', 'heatmap')}>{t.heatmap}</button>
+            </div>
+          </div>
+          <WorkloadChart
+            tasks={tasks}
+            subjects={SUBJECTS}
+            capacity={tweaks.capacity}
+            dayLabels={dayLabels}
+            dates={dates}
+            todayDate={todayDate}
+            chartType={tweaks.chartType}
+            density={tweaks.density}
+            t={t}
+            onMoveSlot={handleMoveSlot}
+            onSelectTask={(id) => setSelectedTaskId(id === selectedTaskId ? null : id)}
+            selectedTaskId={selectedTaskId}
+          />
+        </div>
+
+        {/* Legend */}
+        <div className="legend">
+          <div className="legend-title">{t.legend}</div>
+          <div className="legend-row">
+            {SUBJECTS.filter((s) => tasks.some((task) => task.subjectId === s.id)).map((s) => (
+              <div key={s.id} className="legend-item">
+                <span className="legend-dot" style={{ background: s.color }} />
+                <span>{s.name}</span>
+              </div>
+            ))}
+            {tasks.length === 0 && <span className="legend-item" style={{ color: 'var(--ink-3)' }}>—</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* Side panel */}
+      <div className="side">
+        <div className="side-head">
+          <div className="side-title">{t.yourTasks}</div>
+          <button className="btn-add" onClick={() => setShowAdd(true)}>{t.addTask}</button>
+        </div>
+        <TaskList
+          tasks={tasks}
+          subjects={SUBJECTS}
+          dayLabels={dayLabels}
+          dates={dates}
+          capacity={tweaks.capacity}
+          t={t}
+          onDeleteTask={handleDeleteTask}
+          onUpdateTask={handleUpdateTask}
+          onSelectTask={(id) => setSelectedTaskId(id === selectedTaskId ? null : id)}
+          selectedTaskId={selectedTaskId}
+        />
+      </div>
+
+      {/* Add Task modal */}
+      {showAdd && (
+        <div className="modal-bg" onClick={(e) => e.target === e.currentTarget && setShowAdd(false)}>
+          <AddTaskForm
+            subjects={SUBJECTS}
+            dayLabels={dayLabels}
+            dates={dates}
+            capacity={tweaks.capacity}
+            onAdd={handleAddTask}
+            onCancel={() => setShowAdd(false)}
+            t={t}
+          />
+        </div>
+      )}
+
+      {/* Tweaks */}
+      <TweaksPanel title="Tweaks">
+        <TweakSection label="Display" />
+        <TweakRadio label="Language" value={tweaks.language}
+                    options={[{value:'en',label:'EN'}, {value:'th',label:'TH'}]}
+                    onChange={(v) => setTweak('language', v)} />
+        <TweakRadio label="Chart" value={tweaks.chartType}
+                    options={[
+                      {value:'stacked', label:'Stack'},
+                      {value:'bar', label:'Bar'},
+                      {value:'heatmap', label:'Heat'}
+                    ]}
+                    onChange={(v) => setTweak('chartType', v)} />
+        <TweakRadio label="Density" value={tweaks.density}
+                    options={[{value:'compact',label:'Compact'},{value:'comfortable',label:'Comfortable'}]}
+                    onChange={(v) => setTweak('density', v)} />
+        <TweakToggle label="Dark mode" value={tweaks.dark}
+                     onChange={(v) => setTweak('dark', v)} />
+        <TweakSection label="Capacity" />
+        <TweakSlider label="Hours per day" value={tweaks.capacity}
+                     min={2} max={12} step={1} unit="h"
+                     onChange={(v) => setTweak('capacity', v)} />
+      </TweaksPanel>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
